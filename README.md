@@ -152,6 +152,7 @@ Evaluation was performed on the **held-out California Test Set**.
 5.  **FCN (Fully Convolutional Networks):** Long et al., CVPR 2015.
 6.  **SegFormer:** Xie et al., NeurIPS 2021.
 7.  **AnyLabeling:** [GitHub Repository](https://anylabeling.nrl.ai/)
+8.  **InternImage:** Cao, H., et al. 2022
 
 ---
 
