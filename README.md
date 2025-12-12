@@ -149,7 +149,9 @@ Evaluation was performed on the **held-out California Test Set**.
 2.  **HRNet:** Wang et al., TPAMI 2020.
 3.  **BDPV Dataset:** Jiang et al., ESSD 2021.
 4.  **SAM2:** Ravi et al., arXiv 2024.
-5.  **AnyLabeling:** [GitHub Repository](https://anylabeling.nrl.ai/)
+5.  **FCN (Fully Convolutional Networks):** Long et al., CVPR 2015.
+6.  **SegFormer:** Xie et al., NeurIPS 2021.
+7.  **AnyLabeling:** [GitHub Repository](https://anylabeling.nrl.ai/)
 
 ---
 
