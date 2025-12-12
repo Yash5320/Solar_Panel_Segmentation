@@ -31,9 +31,7 @@ try:
 except Exception:
     TRANSFORMERS_AVAILABLE = False
 
-# HRNet custom repo import - try to add path if user gives it
-# We'll do dynamic import inside loader function to avoid early failures.
-
+# HRNet custom repo import - will be dynamically added in loader function
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
@@ -46,13 +44,17 @@ def read_image_rgb(path: Path) -> np.ndarray:
 
 def save_mask_png(mask: np.ndarray, path: Path):
     """
+    Save a binary mask as PNG.
     mask: binary uint8 array (H, W) with values 0/255 or 0/1
     """
     m = (mask > 0).astype(np.uint8) * 255
     Image.fromarray(m).save(str(path))
 
 def save_overlay(image: np.ndarray, mask_bin: np.ndarray, out_path: Path, alpha: float = 0.5):
-    # mask_bin is 0/1 array
+    """
+    Save an overlay image with the mask in red.
+    mask_bin: binary 0/1 array
+    """
     overlay = image.copy()
     mask_rgb = np.zeros_like(image)
     mask_rgb[mask_bin == 1] = [255, 0, 0]  # red
@@ -61,6 +63,7 @@ def save_overlay(image: np.ndarray, mask_bin: np.ndarray, out_path: Path, alpha:
 
 def compute_confusion_and_scores(pred_bin: np.ndarray, gt_bin: np.ndarray) -> Dict[str, float]:
     """
+    Compute confusion matrix and standard segmentation metrics.
     pred_bin, gt_bin: binary 0/1 arrays
     Returns: dict with tp, fp, fn, tn, iou, precision, recall, f1
     """
@@ -78,7 +81,10 @@ def compute_confusion_and_scores(pred_bin: np.ndarray, gt_bin: np.ndarray) -> Di
     return {'tp': tp, 'fp': fp, 'fn': fn, 'tn': tn, 'iou': iou, 'precision': precision, 'recall': recall, 'f1': f1}
 
 def build_segformer_loader(checkpoint: Optional[str], device: torch.device):
-    """Return function infer_segformer(img: np.ndarray)->prob_map (float32 HxW)"""
+    """
+    Initialize SegFormer (MiT-B2) model and return inference function.
+    Returns: infer(img: np.ndarray) -> probability map (float32 HxW)
+    """
     if not TRANSFORMERS_AVAILABLE:
         raise RuntimeError("transformers not available. pip install transformers and accelerate.")
     print("Loading SegFormer (MiT-B2)...")
@@ -88,7 +94,7 @@ def build_segformer_loader(checkpoint: Optional[str], device: torch.device):
         ignore_mismatched_sizes=True
     )
     if checkpoint:
-        # try to load custom thresholded checkpoint if provided
+        # Load custom checkpoint if provided
         try:
             sd = torch.load(checkpoint, map_location='cpu')
             if 'model' in sd:
@@ -102,33 +108,27 @@ def build_segformer_loader(checkpoint: Optional[str], device: torch.device):
     model.eval()
 
     def infer(img: np.ndarray) -> np.ndarray:
-        # img: HxWx3 uint8 RGB
         H, W = img.shape[:2]
-        # processor handles resize/normalize->tensor
         inputs = processor(images=Image.fromarray(img), return_tensors="pt").to(device)
         with torch.no_grad():
             out = model(**inputs)
-            logits = out.logits  # [1, C, h', w']
-            # Upsample logits to original size
+            logits = out.logits
             logits_up = F.interpolate(logits, size=(H, W), mode='bilinear', align_corners=False)
-            # If binary (C==1) use sigmoid, else softmax and take class 1 prob
             C = logits_up.shape[1]
             if C == 1:
                 prob = torch.sigmoid(logits_up[:, 0, :, :])
             else:
                 probs = torch.softmax(logits_up, dim=1)
-                # assume class 1 is foreground
                 foreground = 1 if probs.shape[1] > 1 else 0
                 prob = probs[:, foreground, :, :]
             prob_np = prob.squeeze().cpu().numpy().astype(np.float32)
-            prob_np = np.clip(prob_np, 0.0, 1.0)
-            return prob_np
+            return np.clip(prob_np, 0.0, 1.0)
     return infer
 
 def build_hrnet_loader(hrnet_repo_path: Optional[str], checkpoint: Optional[str], device: torch.device):
     """
-    hrnet_repo_path: path to HRNet repo root that contains 'lib' and 'models/seg_hrnet.py'
-    Returns function infer_hrnet(img) -> prob_map (H,W)
+    Initialize HRNet segmentation model.
+    Returns: infer(img) -> probability map (HxW)
     """
     if hrnet_repo_path is None:
         raise RuntimeError("hrnet_repo_path must be provided to load HRNet model.")
@@ -141,7 +141,6 @@ def build_hrnet_loader(hrnet_repo_path: Optional[str], checkpoint: Optional[str]
     except Exception as e:
         raise RuntimeError(f"Could not import HRNet library from {hrnet_repo_path}: {e}")
 
-    # Build a minimal config similar to the user's script (adapt if needed)
     from yacs.config import CfgNode as CN
     config = CN()
     config.MODEL = CN()
@@ -157,7 +156,6 @@ def build_hrnet_loader(hrnet_repo_path: Optional[str], checkpoint: Optional[str]
     config.MODEL.ALIGN_CORNERS = False
 
     model = seg_hrnet.get_seg_model(config)
-    # Load weights
     if checkpoint:
         sd = torch.load(checkpoint, map_location='cpu')
         if list(sd.keys())[0].startswith('module.'):
@@ -165,24 +163,21 @@ def build_hrnet_loader(hrnet_repo_path: Optional[str], checkpoint: Optional[str]
         model.load_state_dict(sd)
     model.to(device)
     model.eval()
-    # Use albumentations-like normalization used in training
+
     transform = A.Compose([
-        A.Resize(400, 400),  # assume HRNet expects 400x400 as earlier
+        A.Resize(400, 400),
         A.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225]),
         ToTensorV2()
     ])
 
     def infer(img: np.ndarray) -> np.ndarray:
-        # img: HxWx3 uint8 rgb
         H, W = img.shape[:2]
         aug = transform(image=img)
-        tensor = aug['image'].unsqueeze(0).to(device)  # [1,3,Ht,Wt]
+        tensor = aug['image'].unsqueeze(0).to(device)
         with torch.no_grad():
-            logits = model(tensor)  # HRNet typically returns logits [1,1,Ht,Wt] or [1,C,Ht,Wt]
-            # ensure logits is tensor
+            logits = model(tensor)
             if isinstance(logits, (tuple, list)):
                 logits = logits[0]
-            # Sigmoid for binary
             logits_up = F.interpolate(logits, size=(H, W), mode='bilinear', align_corners=False)
             if logits_up.shape[1] == 1:
                 prob = torch.sigmoid(logits_up[:, 0, :, :])
@@ -194,48 +189,48 @@ def build_hrnet_loader(hrnet_repo_path: Optional[str], checkpoint: Optional[str]
 
 def build_internimage_loader(mmseg_config: Optional[str], mmseg_checkpoint: Optional[str], device: str):
     """
-    Loads mmseg model and returns a function infer_internimg(img)->prob_map(H,W)
-    Fallback: if mmseg cannot produce probabilities, we'll use label map -> binary prob (0/1).
+    Initialize InternImage model using mmsegmentation.
+    Returns: infer(img) -> probability map (HxW)
     """
     if not MMSeg_AVAILABLE:
         raise RuntimeError("mmseg (OpenMMLab) not available. Install mmsegmentation.")
-
     if mmseg_config is None or mmseg_checkpoint is None:
         raise RuntimeError("Provide mmseg config and checkpoint paths for InternImage model.")
+
     print("Loading InternImage (mmseg) segmentor...")
     model = init_segmentor(mmseg_config, mmseg_checkpoint, device=device)
     model.eval()
 
     def infer(img: np.ndarray) -> np.ndarray:
         """
-        mmseg inference_segmentor typically returns label map result[0] (H, W).
-        We'll attempt to retrieve class scores if possible; otherwise, convert label map to binary prob map.
+        Infer probability map from InternImage.
+        Returns HxW float32 probability map.
         """
-        # mmseg functions can accept file path or numpy array (BGR or RGB depending). We'll pass RGB.
-        result = inference_segmentor(model, img)  # returns list, typically [pred_map] where pred_map is int labels
-        pred_label = result[0].astype(np.uint8)
-        # try to compute soft scores: if model has 'show_result' or 'forward' to get logits, that's advanced; fallback to binary.
-        prob = (pred_label == 1).astype(np.float32)
-        return prob
+        # Use return_logits=True to extract probabilities instead of label map
+        result = inference_segmentor(model, img, return_logits=True)
+        logits = result[0]  # [C,H,W]
+        if logits.shape[0] == 1:
+            prob = torch.sigmoid(torch.from_numpy(logits[0]))
+        else:
+            prob = torch.softmax(torch.from_numpy(logits), dim=0)[1]
+        return np.clip(prob.cpu().numpy().astype(np.float32), 0.0, 1.0)
     return infer
 
 def build_pspnet_loader(psp_checkpoint: Optional[str], device: torch.device):
     """
-    Build PSPNet using segmentation_models_pytorch.
-    Configure encoder and classes appropriately. Load weights if provided.
+    Initialize PSPNet using segmentation_models_pytorch.
+    Returns: infer(img) -> probability map (HxW)
     """
     if not SMP_AVAILABLE:
         raise RuntimeError("segmentation_models_pytorch (smp) not available. pip install segmentation-models-pytorch")
-    # choose encoder - you can change to a stronger encoder as needed
     encoder = "resnet34"
     print("Building PSPNet (smp) with encoder:", encoder)
-    # Binary segmentation -> classes=1 with sigmoid
     model = smp.PSPNet(
         encoder_name=encoder,
         encoder_weights="imagenet",
         in_channels=3,
         classes=1,
-        activation=None  # we will apply sigmoid
+        activation=None
     )
     if psp_checkpoint:
         try:
@@ -250,6 +245,7 @@ def build_pspnet_loader(psp_checkpoint: Optional[str], device: torch.device):
             print("Warning: could not load PSPNet checkpoint:", e)
     model.to(device)
     model.eval()
+
     transform = A.Compose([
         A.Resize(400, 400),
         A.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225]),
@@ -261,11 +257,10 @@ def build_pspnet_loader(psp_checkpoint: Optional[str], device: torch.device):
         aug = transform(image=img)
         tensor = aug['image'].unsqueeze(0).to(device)
         with torch.no_grad():
-            logits = model(tensor)  # [1,1,Ht,Wt]
+            logits = model(tensor)
             logits_up = F.interpolate(logits, size=(H, W), mode='bilinear', align_corners=False)
             prob = torch.sigmoid(logits_up[:, 0, :, :])
-            prob_np = prob.squeeze().cpu().numpy().astype(np.float32)
-            return np.clip(prob_np, 0.0, 1.0)
+            return np.clip(prob.squeeze().cpu().numpy().astype(np.float32), 0.0, 1.0)
     return infer
 
 def fuse_prob_maps(prob_maps: Dict[str, np.ndarray], weights: Dict[str, float]) -> np.ndarray:
